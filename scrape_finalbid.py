@@ -19,12 +19,15 @@ from __future__ import annotations
 import argparse, asyncio, html, json, logging, os, random, re, signal, sys, threading, time
 import urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-# Reuse the colour logging + helpers from the sibling AuctionHistory scraper.
-# NOTE: this exec also defines API_BASE / DEFAULT_UA etc; we override ours below.
-exec(open(os.path.join(os.path.dirname(__file__), "..", "AuctionHistory", "scrape_auctionhistory.py")).read().split("class HttpError")[0])
+# This module is self-contained: it used to `exec` the prefix of the sibling
+# AuctionHistory scraper for its colour logger, but nothing from that file is
+# referenced any more (LOG, DEFAULT_UA, PER_PAGE and ARCHIVE_BASE are all
+# defined below, and every import is already declared above). Keeping the exec
+# meant this script only ran on a machine that happened to have
+# ../AuctionHistory/scrape_auctionhistory.py checked out next to it.
 
 ARCHIVE_BASE = "https://finalbid.vin/en/archive"
 PER_PAGE = 24
