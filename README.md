@@ -41,6 +41,37 @@ python run_scraper.py                  # resume: top-up newest, then deep-crawl
 python export_csv.py                   # lots + bid_history + lot_sales CSVs
 ```
 
+## Demo mode (scrape for real, no database)
+
+```bash
+python demo.py                       # LIVE: 50 lots from finalbid.vin, no DB
+python run_scraper.py --demo --demo-limit 200
+python demo.py --limit 200           # more lots
+python demo.py --limit 20 --no-detail   # listing rows only (1 req/lot)
+python demo.py --out data/demo.jsonl    # keep the raw rows
+python demo.py --offline              # synthetic pages, no network at all
+```
+
+Live demo mode runs the real scraper with **every database feature switched
+off** — no `--load-db`, no `--track-pages`, no `--refresh-bid-history`, no
+DSN — so nothing can touch Postgres even if a DSN is configured. Lots are
+mirrored to a JSONL file (`data/demo_live_<timestamp>.jsonl`, truncated at the
+start of each run), then summarised: a sample table, a fill-rate bar per
+detail column, and counts for price / odometer / sale-history rows.
+
+With no `scrape_pages` checkpoint there is nothing to resume from, so a demo
+run walks from page 1 and stops at `--limit`. The limit is applied after each
+page's detail phase, so the effective count is rounded up to a page boundary
+(24 lots/page).
+
+`--offline` swaps in synthetic pages and needs neither the network, Postgres
+nor `httpx` — a `DemoClient` with the same `get_text` / `fetch_many` shape as
+`AsyncFetcher` serves fixtures to the same parsers. The fixtures deliberately
+include the awkward cases the real site produces: a 14-character VIN, a card
+whose `copart-<n>[-<vin>]` key cannot be parsed (must be skipped, not written
+with a blank source), a `0 mi · not actual` odometer, and a detail page with no
+ld+json block.
+
 ## Modes
 
 | Command | Behaviour |

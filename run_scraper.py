@@ -358,9 +358,26 @@ def main() -> int:
     ap.add_argument("--db-wait", type=int, default=0, metavar="SECONDS",
                     help="if the Postgres in DSN is not answering yet, retry for "
                          "this many seconds before giving up (0 = fail fast)")
+    ap.add_argument("--demo", action="store_true",
+                    help="scrape for real with every database feature off; "
+                         "rows go to a JSONL file instead of Postgres")
+    ap.add_argument("--demo-limit", type=int, default=50,
+                    help="lots to scrape in --demo mode (default 50)")
+    ap.add_argument("--demo-offline", action="store_true",
+                    help="with --demo, use synthetic pages instead of the live "
+                         "site (no network, no Postgres)")
     args = ap.parse_args()
 
     env = load_env()
+
+    # Demo mode never touches Postgres, so it runs before the DB check (which
+    # would otherwise fail outright on an unset/unreachable DSN).
+    if args.demo:
+        argv = [sys.executable, str(HERE / "demo.py"),
+                "--limit", str(args.demo_limit)]
+        if args.demo_offline:
+            argv.append("--offline")
+        return subprocess.call(argv)
 
     # Make sure the DB is reachable before doing anything that needs it.
     needs_db = True  # everything except --count flows through the DB
