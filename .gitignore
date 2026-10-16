@@ -1,0 +1,8 @@
+.env
+rebackfill.out
+rebackfill.log
+
+__pycache__/
+*.log
+*.csv
+backups/

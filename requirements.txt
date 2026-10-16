@@ -1,0 +1,14 @@
+# FinalBid.vin scraper — Python dependencies
+# Install:  pip install -r requirements.txt
+#   (or:  pip install "psycopg[binary]" for the DB sink only)
+
+# Async HTTP client with a shared keep-alive pool (scrape_finalbid.AsyncFetcher).
+# Without it the scraper falls back to urllib + threads (~15-20x slower).
+httpx>=0.27,<1.0
+
+# Postgres driver (psycopg 3). `[binary]` ships prebuilt wheels, so no
+# libpq/compiler is needed on Windows.
+psycopg[binary]>=3.1,<4.0
+
+# Test runner for tests/
+pytest>=8.0
