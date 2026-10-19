@@ -441,6 +441,14 @@ class Db:
             # a listing-only re-walk sends photos=[] — keep what we have
             return ("photos = COALESCE(NULLIF(EXCLUDED.photos, '[]'::jsonb),"
                     " lots.photos)")
+        if c in ("raw", "detail_specs"):
+            # Large TOASTed payloads: only rewrite when the content really
+            # changed, so an unchanged re-upsert does not create a new TOAST
+            # value + a rewrite of every index on `lots`. A NULL still keeps the
+            # existing value (same rule as the COALESCE columns).
+            return (f"{c} = CASE WHEN EXCLUDED.{c} IS NULL THEN lots.{c}"
+                    f" WHEN EXCLUDED.{c} IS DISTINCT FROM lots.{c}"
+                    f" THEN EXCLUDED.{c} ELSE lots.{c} END")
         return f"{c} = COALESCE(EXCLUDED.{c}, lots.{c})"
 
     # Postgres allows 65535 bind parameters per statement. With one bind per
@@ -487,7 +495,6 @@ class Db:
         except Exception as e:
             LOG.error(f"DB load_lots failed ({len(rows)} rows): {e}")
             return 0
-
     def load_sales(self, sales: List[Dict[str, Any]]) -> int:
         """Upsert parsed per-lot sale-history rows into `lot_sales`."""
         if not self.enabled or not sales:
@@ -553,7 +560,18 @@ class Db:
         )
 
     def refresh_bid_history(self, vins: Optional[List[str]] = None) -> Optional[int]:
-        """Rebuild bid_history for `vins` (or every VIN when vins is None)."""
+        """Rebuild bid_history for `vins` (or every VIN when vins is None).
+
+        Returns the number of rows written, 0 when nothing changed, or -1 when
+        the call was skipped because another process holds the advisory lock.
+
+        A full sweep (vins=None) rewrites every VIN in one transaction. With
+        several scrapers running that used to queue behind itself and deadlock,
+        so the SQL function takes an advisory lock and returns -1 straight away
+        when another process is already sweeping
+        (see init/05-bid-history-tuning.sql). Targeted calls are cheap and use a
+        shared lock, so they run in parallel with each other.
+        """
         if not self.enabled:
             return None
         try:
@@ -1089,15 +1107,52 @@ def main():
         why = f"explicit --start-page {args.start_page} (walk to the end)"
     LOG.info(f"plan: {why}")
 
+    dirty_vins = set()          # VINs touched since the last bid_history refresh
+    dirty_lock = threading.Lock()
+
     def refresh_history(force=False):
+        """Refresh bid_history for the VINs this run has touched.
+
+        A full rebuild (every VIN) is a ~294k-row transaction; running one every
+        few minutes in each of several scrapers is what stalled the crawls. So
+        the periodic pass only rebuilds the VINs actually scraped since the last
+        pass; the full sweep is `refresh_history_all()` at the end of a run and
+        `run_scraper.py --refresh`.
+        """
         if not (db and db.enabled and args.refresh_bid_history):
             return
         if not force and (time.time() - last_refresh[0]) < args.bid_history_minutes * 60:
             return
         last_refresh[0] = time.time()
-        n = db.refresh_bid_history()
+        with dirty_lock:
+            vins = sorted(dirty_vins)
+        if not vins:
+            return
+        n = db.refresh_bid_history(vins)
+        if n == -1:
+            # A sweep is in progress and covers these VINs; keep them queued so
+            # a later pass (or the end-of-run sweep) still rebuilds them.
+            return
+        with dirty_lock:
+            dirty_vins.difference_update(vins)
         if n is not None:
-            LOG.info(f"bid_history full rebuild ({n} VINs, every {args.bid_history_minutes:g}m)")
+            LOG.info(f"bid_history refresh ({n} rows from {len(vins)} VINs, "
+                     f"every {args.bid_history_minutes:g}m)")
+
+    def refresh_history_all():
+        """Full rebuild, used once at the end of a run.
+
+        The periodic pass only touches VINs this run scraped; a full sweep at the
+        end catches anything a crashed/previous run left behind. It is serialised
+        by an advisory lock in SQL, so concurrent runs just skip it.
+        """
+        if not (db and db.enabled and args.refresh_bid_history):
+            return
+        n = db.refresh_bid_history()
+        if n == -1:
+            LOG.info("bid_history full sweep skipped: another process is sweeping")
+        elif n is not None:
+            LOG.info(f"bid_history full sweep ({n} VINs)")
 
     def fetch(page):
         # Listing only — detail happens in walk() at the point the page is kept.
@@ -1181,7 +1236,7 @@ def main():
                 print(f"  re-detail limit {args.limit} reached -> stop")
                 break
             refresh_history()
-        refresh_history(force=True)
+        refresh_history_all()
         print(f"re-detail finished: {done:,} lots refreshed {failed_total:,} failed")
 
     if args.re_detail:
@@ -1323,11 +1378,15 @@ def main():
                             stats["sales"] += db.load_sales(sales)
                         # bid_history is generated right here for every VIN we
                         # just detailed, from the detail page's own sale data.
+                        # VINs are also remembered so the periodic refresh only
+                        # rebuilds what actually changed.
                         vins = sorted({l["vin"] for l in lots
                                        if l.get("detailed") and l.get("vin")})
                         if vins:
                             db.refresh_bid_history(vins)
                             stats["bh_vins"] += len(vins)
+                            with dirty_lock:
+                                dirty_vins.update(vins)
                             print(f"  bid_history: page={p} vins={len(vins)}")
                     if args.track_pages:
                         db.mark_page(fkey, filters, p, args.per_page, st,
@@ -1381,7 +1440,7 @@ def main():
     client.close()
     if _SIGINT.is_set():
         print("interrupted — finishing in-flight pages, then rebuilding bid_history…")
-    refresh_history(force=True)
+    refresh_history_all()
     el = time.time() - t0
     seen = max(stats["pages_seen"], 1)
     det = stats["detail_fetched"]

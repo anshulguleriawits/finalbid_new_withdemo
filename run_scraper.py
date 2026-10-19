@@ -226,7 +226,11 @@ def refresh_bid_history(env: dict) -> None:
     print("\n\033[1m########## final: refresh bid_history ##########\033[0m")
     out = query(env, "SELECT refresh_bid_history();")
     if out:
-        print(f"  bid_history rebuilt ({out.splitlines()[-1].strip()} VINs)")
+        val = out.splitlines()[-1].strip()
+        if val == "-1":
+            print("  bid_history: skipped (another process is already sweeping)")
+        else:
+            print(f"  bid_history rebuilt ({val} VINs)")
     else:
         print("  (refresh failed — is the DB up and is refresh_bid_history() defined?)")
 

@@ -71,10 +71,16 @@ python export_csv.py                   # lots + bid_history + lot_sales CSVs
   each VIN just detailed, from that detail page's own sale data (`lots +
   lot_sales`; captured history wins per lot, so earlier re-listing bids are not
   lost). Log line: `bid_history: page=N vins=K`.
-- A full sweep still runs every `BID_HISTORY_MINUTES` (default 5) and once at the
-  end as a safety net (also garbage-collects VINs that no longer exist). Ctrl-C
-  finishes in-flight pages, rebuilds, then exits. `run_scraper.py --refresh`
-  forces a full sweep.
+- Every `BID_HISTORY_MINUTES` (default 5) the VINs touched since the last pass are
+  refreshed again (a safety net for anything that raced). **Only those VINs** —
+  a full sweep of all ~294k rows every 5 minutes in every scraper was what made
+  parallel runs stall for minutes in lock waits.
+- A **full sweep** runs once at the end of a run (and on Ctrl-C, and via
+  `run_scraper.py --refresh`). It takes a Postgres advisory lock, so if several
+  scrapers finish together only one sweeps and the rest skip. It also
+  garbage-collects VINs that no longer exist.
+- The sweep skips unchanged rows (`ON CONFLICT ... WHERE ... IS DISTINCT FROM`),
+  so a sweep with nothing new rewrites a handful of rows instead of all 294k.
 
 ## Detail-page fields
 
@@ -171,10 +177,13 @@ python export_csv.py                 # all three files
 python export_csv.py --lots-only
 python export_csv.py --bid-only
 python export_csv.py --sales-only    # just the per-lot sale history
-python export_csv.py --include-raw
+python export_csv.py --include-specs # keep the verbatim detail_specs JSON
+python export_csv.py --limit 500     # sample rows per table (smoke test)
 ```
 
-Writes timestamped CSVs from `lots`, `bid_history` and `lot_sales`.
+Writes timestamped CSVs from `lots`, `bid_history` and `lot_sales`. The DSN
+comes from `--dsn`, then `$DSN`, then `DSN=` in `.env`. Photos and raw source
+JSON are not exported (both are redundant with the promoted columns).
 
 ## Notes
 

@@ -95,7 +95,10 @@ CREATE INDEX IF NOT EXISTS lots_make_trgm_idx  ON lots USING gin (make  gin_trgm
 CREATE INDEX IF NOT EXISTS lots_model_trgm_idx ON lots USING gin (model gin_trgm_ops);
 
 -- GIN index for querying the raw JSON document (jsonb_path_ops for @> / ? ops).
-CREATE INDEX IF NOT EXISTS lots_raw_gin_idx ON lots USING gin (raw jsonb_path_ops);
+-- Disabled: nothing in the scraper/export queries `raw` with @> or ?, and it
+-- costs 396 MB + a rewrite on every lots upsert. See init/05-bid-history-tuning.sql
+-- to re-enable it if ad-hoc JSON search is ever needed.
+-- CREATE INDEX IF NOT EXISTS lots_raw_gin_idx ON lots USING gin (raw jsonb_path_ops);
 
 -- Optional: keep only the newest row per VIN handy for history lookups.
 CREATE INDEX IF NOT EXISTS lots_vin_date_idx ON lots (vin, sale_date DESC);

@@ -125,7 +125,9 @@ COMMENT ON COLUMN bid_history.bid_history      IS 'JSON array of all this vehicl
 CREATE INDEX IF NOT EXISTS bid_history_latest_idx  ON bid_history (latest_bid_date DESC);
 CREATE INDEX IF NOT EXISTS bid_history_first_idx   ON bid_history (first_bid_date DESC);
 CREATE INDEX IF NOT EXISTS bid_history_multi_idx   ON bid_history (vin) WHERE sale_count > 1;
-CREATE INDEX IF NOT EXISTS bid_history_json_gin_idx ON bid_history USING gin (bid_history);
+-- Disabled: nothing queries bid_history with @> / ?, and it costs 229 MB + a
+-- rewrite on every bid_history update. See init/05-bid-history-tuning.sql.
+-- CREATE INDEX IF NOT EXISTS bid_history_json_gin_idx ON bid_history USING gin (bid_history);
 
 DROP TRIGGER IF EXISTS bid_history_touch ON bid_history;
 CREATE TRIGGER bid_history_touch

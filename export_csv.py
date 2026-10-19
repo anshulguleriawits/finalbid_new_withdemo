@@ -3,23 +3,29 @@
 export_csv.py — export the finalbid.com Postgres tables to CSV
 ===================================================================
 
-Connects to the Postgres database and writes two timestamped CSV files:
+Connects to the Postgres database and writes three timestamped CSV files:
 
-    finalbid_data_<YYYYMMDD_HHMMSS>.csv   <- from the `lots` table
-    bid_data_finalbid_<YYYYMMDD_HHMMSS>.csv <- from the `bid_history` table
+    finalbid_data_<YYYYMMDD_HHMMSS>.csv      <- from the `lots` table
+    bid_data_finalbid_<YYYYMMDD_HHMMSS>.csv  <- from the `bid_history` table
+    lot_sales_finalbid_<YYYYMMDD_HHMMSS>.csv <- from the `lot_sales` table
 
 Column names are expanded into readable names and the jsonb columns
-(`insight`, `photos`, `bid_history`) are flattened into ordinary CSV columns,
-so the files open cleanly in Excel / pandas / Power BI without any JSON parsing.
+(`insight`, `bid_history`) are flattened into ordinary CSV columns, so the
+files open cleanly in Excel / pandas / Power BI without any JSON parsing.
+
+DSN resolution: `--dsn`, then `$DSN`, then `DSN=` in `.env` next to this file,
+then the local docker-compose default.
 
 Requires:  pip install "psycopg[binary]"
 
 Usage
 -----
-    python export_csv.py                          # export both tables
+    python export_csv.py                          # export all three tables
     python export_csv.py --lots-only              # just the lots file
     python export_csv.py --bid-only               # just the bid-history file
-    python export_csv.py --include-raw            # also keep the full raw JSON
+    python export_csv.py --sales-only             # just the per-lot sale history
+    python export_csv.py --include-specs          # also keep detail_specs JSON
+    python export_csv.py --limit 500              # sample N rows per table
     python export_csv.py --dsn postgresql://user:pass@host:5432/db
     python export_csv.py --outdir D:\\exports
 """
@@ -27,14 +33,13 @@ Usage
 from __future__ import annotations
 
 import argparse
-import csv
 import os
 import sys
 from datetime import datetime
 
 DEFAULT_DSN = "postgresql://auction:auction@localhost:5433/finalbid"
-PHOTO_BASE = "https://api.finalbid.com/photos/"
 STAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 
 # ---------------------------------------------------------------------------
 # `lots` -> finalbid_data_<time>.csv
@@ -74,8 +79,12 @@ SELECT
     l.salvage_number            AS salvage_number,
     l.seller                    AS seller,
     l.sold_status               AS sold_status,
-    l.avg_final_bid             AS avg_final_bid_usd,
-    l.est_repair                AS est_repair_usd,
+    -- the detail page fills the promoted columns; insight is the fallback for
+    -- rows scraped before init/04-detail-fields.sql
+    COALESCE(l.avg_final_bid,
+             NULLIF(l.insight->>'avg_final_bid','')::int) AS avg_final_bid_usd,
+    COALESCE(l.est_repair,
+             NULLIF(l.insight->>'est_repair','')::int)    AS est_repair_usd,
     l.auctions_on_record        AS auctions_on_record,
     l.first_seen                AS first_seen_year,
     l.flagged                   AS flagged,
@@ -83,26 +92,21 @@ SELECT
     l.scraped                   AS scraped,
     l.detailed                  AS detailed,
     l.history_captured          AS history_captured,
-    l.retail_usd                AS estimated_retail_usd,
-    NULLIF(l.insight->>'pct','')::int       AS pct_of_retail,
-    NULLIF(l.insight->>'avg_usd','')::int   AS pool_avg_price_usd,
-    NULLIF(l.insight->>'top','')::int       AS price_percentile,
-    NULLIF(l.insight->>'mpy','')::int       AS miles_per_year,
-    NULLIF(l.insight->>'avg_mpy','')::int   AS archive_avg_miles_per_year,
-    NULLIF(l.insight->>'n','')::bigint      AS archive_size_at_insight,
-    NULLIF(l.insight->>'pool','')           AS insight_pool,
-    NULLIF(l.insight->>'at','')::date       AS insight_generated_date,
-    COALESCE(jsonb_array_length(l.photos), 0) AS photo_count,
-    p.photo_urls                          AS photo_urls,
-    l.url                          AS lot_url,
-    l.created_at                   AS source_created_at,
-    l.ingested_at                  AS ingested_at
-    {RAW_COL}
+    l.detail_attempts           AS detail_attempts,
+    l.detail_error              AS detail_error,
+    COALESCE(l.retail_usd,
+             NULLIF(l.insight->>'retail_usd','')::int)    AS estimated_retail_usd,
+    CASE WHEN COALESCE(l.retail_usd,
+                       NULLIF(l.insight->>'retail_usd','')::int) > 0
+         THEN round(l.price_usd::numeric * 100
+                    / COALESCE(l.retail_usd,
+                               NULLIF(l.insight->>'retail_usd','')::int), 1)
+    END                         AS pct_of_retail,
+    l.public_token              AS public_token,
+    l.url                       AS lot_url,
+    l.created_at                AS source_created_at,
+    l.ingested_at               AS ingested_at{SPECS_COL}
 FROM lots l
-LEFT JOIN LATERAL (
-    SELECT string_agg('{PHOTO_BASE}' || x, ' ') AS photo_urls
-    FROM jsonb_array_elements_text(COALESCE(l.photos, '[]'::jsonb)) AS x
-) p ON TRUE
 ORDER BY l.sale_date DESC NULLS LAST, l.id
 """
 
@@ -133,6 +137,7 @@ SELECT
     x.bid_prices             AS bid_prices_usd,
     x.titles                 AS titles,
     x.damages                AS damages,
+    x.statuses               AS statuses,
     b.bid_history::text      AS bids_json,
     b.created_at             AS record_created_at,
     b.updated_at             AS record_updated_at
@@ -145,7 +150,8 @@ LEFT JOIN LATERAL (
         array_agg(e->>'lot_number')   AS lot_numbers,
         array_agg((e->>'price')::int) AS bid_prices,
         array_agg(e->>'title')        AS titles,
-        array_agg(e->>'damage')       AS damages
+        array_agg(e->>'damage')       AS damages,
+        array_agg(e->>'status')       AS statuses
     FROM jsonb_array_elements(COALESCE(b.bid_history, '[]'::jsonb)) AS e
 ) x ON TRUE
 LEFT JOIN LATERAL (
@@ -182,6 +188,31 @@ ORDER BY s.vin, s.sale_date, s.lot_number
 """
 
 
+def load_env(path: str = ENV_FILE) -> dict:
+    """Read KEY=VALUE lines into a dict. Real environment vars win."""
+    env: dict = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    for k in list(env):
+        if k in os.environ:
+            env[k] = os.environ[k]
+    return env
+
+
+def resolve_dsn(cli_dsn: str | None) -> str:
+    """--dsn > $DSN > DSN= in .env > docker-compose default."""
+    return (cli_dsn or os.environ.get("DSN")
+            or load_env().get("DSN") or DEFAULT_DSN)
+
+
 def connect(dsn: str):
     try:
         import psycopg
@@ -198,9 +229,12 @@ def connect(dsn: str):
     return conn
 
 
-def export(conn, sql: str, path: str, label: str, raw_col: str = "") -> int:
+def export(conn, sql: str, path: str, label: str, specs_col: str = "",
+           limit: int | None = None) -> int:
     """Run a COPY ... TO STDOUT CSV query straight into `path`."""
-    sql = sql.replace("{RAW_COL}", raw_col)
+    sql = sql.replace("{SPECS_COL}", specs_col)
+    if limit is not None:
+        sql = f"SELECT * FROM ({sql.strip().rstrip(';')}) AS _q LIMIT {int(limit)}"
     print(f"[export] {label} -> {os.path.basename(path)}", flush=True)
     with conn.cursor() as cur:
         with cur.copy(f"COPY ({sql.strip().rstrip(';')}) TO STDOUT "
@@ -220,16 +254,22 @@ def export(conn, sql: str, path: str, label: str, raw_col: str = "") -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Export lots + bid_history to CSV")
-    ap.add_argument("--dsn", default=os.environ.get("DSN", DEFAULT_DSN))
+    ap = argparse.ArgumentParser(
+        description="Export lots + bid_history + lot_sales to CSV")
+    ap.add_argument("--dsn", default=None,
+                    help="Postgres DSN (default: $DSN, then DSN= in .env)")
     ap.add_argument("--outdir", default=os.path.dirname(os.path.abspath(__file__)))
     ap.add_argument("--lots-only", action="store_true")
     ap.add_argument("--bid-only", action="store_true")
     ap.add_argument("--sales-only", action="store_true",
                     help="export only the lot_sales (per-lot sale history) file")
-    ap.add_argument("--include-raw", action="store_true",
-                    help="also emit the full source record as a raw_json column")
+    ap.add_argument("--include-specs", action="store_true",
+                    help="also emit the verbatim detail_specs JSON column")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="export at most N rows per table (smoke test / sample)")
     args = ap.parse_args()
+
+    args.dsn = resolve_dsn(args.dsn)
 
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -253,14 +293,15 @@ def main() -> int:
               "       python run_scraper.py --refresh\n")
     print()
 
-    raw_col = ",\n    l.raw::text AS raw_json" if args.include_raw else ""
+    specs_col = (",\n    l.detail_specs::text AS detail_specs_json"
+                 if args.include_specs else "")
 
     if not (args.bid_only or args.sales_only):
-        export(conn, LOTS_SQL, lots_path, "lots", raw_col)
+        export(conn, LOTS_SQL, lots_path, "lots", specs_col, args.limit)
     if not (args.lots_only or args.sales_only):
-        export(conn, BID_SQL, bid_path, "bid_history")
+        export(conn, BID_SQL, bid_path, "bid_history", limit=args.limit)
     if not (args.lots_only or args.bid_only):
-        export(conn, SALES_SQL, sales_path, "lot_sales")
+        export(conn, SALES_SQL, sales_path, "lot_sales", limit=args.limit)
 
     conn.close()
     print("\n[done]")
